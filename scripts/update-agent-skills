@@ -1,0 +1,190 @@
+#!/bin/bash
+set -u
+
+ROOT="$HOME/.local/share/agent-skill-sources/github"
+STATE="$HOME/.local/state/agent-skill-updater"
+REPORTS="$STATE/reports"
+
+LAST_CHECK="$STATE/last-check"
+PENDING="$STATE/pending"
+LOCK="$STATE/update-lock"
+
+INTERVAL=$((7 * 24 * 60 * 60))
+
+mkdir -p "$REPORTS"
+
+force=0
+if [ "${1:-}" = "--force" ]; then
+    force=1
+fi
+
+now=$(date +%s)
+
+# Если есть необработанные обновления — просто сообщаем об этом.
+if [ -s "$PENDING" ]; then
+    echo "Pending skill updates exist:"
+    sed -n '1,20p' "$PENDING"
+fi
+
+# Не проверяем GitHub чаще раза в неделю,
+# если только явно не передан --force.
+if [ "$force" -eq 0 ] && [ -f "$LAST_CHECK" ]; then
+    last=$(stat -f %m "$LAST_CHECK" 2>/dev/null || echo 0)
+
+    if [ $((now - last)) -lt "$INTERVAL" ]; then
+        exit 0
+    fi
+fi
+
+# Не даём двум сессиям одновременно обновлять одни и те же репозитории.
+if ! mkdir "$LOCK" 2>/dev/null; then
+    exit 0
+fi
+
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+# Повторная проверка после взятия lock.
+if [ "$force" -eq 0 ] && [ -f "$LAST_CHECK" ]; then
+    last=$(stat -f %m "$LAST_CHECK" 2>/dev/null || echo 0)
+
+    if [ $((now - last)) -lt "$INTERVAL" ]; then
+        exit 0
+    fi
+fi
+
+export GIT_TERMINAL_PROMPT=0
+
+stamp=$(date '+%Y%m%d-%H%M%S')
+report="$REPORTS/$stamp.md"
+
+changed=0
+check_ok=1
+
+{
+    echo "# Agent skill source update"
+    echo
+    echo "Checked: $(date)"
+    echo
+} > "$report"
+
+while IFS= read -r gitdir; do
+    repo="${gitdir%/.git}"
+
+    before=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || continue
+
+    # Source repos считаем read-only.
+    if [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then
+        {
+            echo "## SKIPPED: $repo"
+            echo
+            echo "Reason: dirty worktree."
+            echo
+        } >> "$report"
+        continue
+    fi
+
+    if ! git -C "$repo" fetch --prune --quiet; then
+        {
+            echo "## FETCH FAILED: $repo"
+            echo
+        } >> "$report"
+
+        check_ok=0
+        continue
+    fi
+
+    upstream=$(git -C "$repo" rev-parse \
+        --abbrev-ref \
+        --symbolic-full-name '@{u}' \
+        2>/dev/null || true)
+
+    if [ -z "$upstream" ]; then
+        {
+            echo "## SKIPPED: $repo"
+            echo
+            echo "Reason: no upstream branch."
+            echo
+        } >> "$report"
+        continue
+    fi
+
+    ahead=$(git -C "$repo" rev-list --count "$upstream..HEAD" 2>/dev/null || echo 0)
+    behind=$(git -C "$repo" rev-list --count "HEAD..$upstream" 2>/dev/null || echo 0)
+
+    # Никогда автоматически не переписываем локальную историю.
+    if [ "$ahead" -ne 0 ]; then
+        {
+            echo "## SKIPPED: $repo"
+            echo
+            echo "Reason: local branch contains commits not present upstream."
+            echo
+        } >> "$report"
+        continue
+    fi
+
+    if [ "$behind" -eq 0 ]; then
+        continue
+    fi
+
+    if ! git -C "$repo" merge --ff-only "$upstream" --quiet; then
+        {
+            echo "## UPDATE FAILED: $repo"
+            echo
+        } >> "$report"
+
+        check_ok=0
+        continue
+    fi
+
+    after=$(git -C "$repo" rev-parse HEAD)
+
+    changed=1
+
+    {
+        echo "## UPDATED: $repo"
+        echo
+        echo "Before: $before"
+        echo "After:  $after"
+        echo
+
+        echo "### Commits"
+        git -C "$repo" log \
+            --no-merges \
+            --pretty='- %h %s' \
+            "$before..$after"
+
+        echo
+        echo "### Changed files"
+        git -C "$repo" diff \
+            --name-status \
+            "$before..$after"
+
+        echo
+    } >> "$report"
+
+done < <(
+    find "$ROOT" -type d -name .git -prune -print 2>/dev/null
+)
+
+# Только успешная проверка считается недельной проверкой.
+if [ "$check_ok" -eq 1 ]; then
+    touch "$LAST_CHECK"
+fi
+
+if [ "$changed" -eq 1 ]; then
+    echo "$report" >> "$PENDING"
+
+    echo
+    echo "GitHub-sourced agent skills were updated."
+    echo "Report:"
+    echo "$report"
+    echo
+    echo "Pending summary required."
+else
+    # Если обновлений не было и ошибок тоже не было — report не нужен.
+    if [ "$check_ok" -eq 1 ]; then
+        rm -f "$report"
+    fi
+fi
+
+exit 0
