@@ -1,0 +1,7 @@
+interface:
+  display_name: "Obsidian DataWeave"
+  short_description: "Brain vault, FTS5 memory, LLM Wiki and NotebookLM workflows."
+  default_prompt: "Use the existing ObsidianDataWeave installation according to its AGENTS.md and SKILL.md contracts."
+
+policy:
+  allow_implicit_invocation: true

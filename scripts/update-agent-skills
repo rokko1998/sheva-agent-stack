@@ -22,8 +22,12 @@ now=$(date +%s)
 
 # Если есть необработанные обновления — просто сообщаем об этом.
 if [ -s "$PENDING" ]; then
-    echo "Pending skill updates exist:"
-    sed -n '1,20p' "$PENDING"
+    printf '%s\n' \
+      "Pending GitHub skill updates exist." \
+      "Before normal work, read and follow:" \
+      "$HOME/.agents/skills/skill-update-summary/SKILL.md" \
+      "Then process the pending reports listed in:" \
+      "$PENDING"
 fi
 
 # Не проверяем GitHub чаще раза в неделю,
@@ -176,10 +180,13 @@ if [ "$changed" -eq 1 ]; then
 
     echo
     echo "GitHub-sourced agent skills were updated."
-    echo "Report:"
-    echo "$report"
+    echo "Report: $report"
     echo
-    echo "Pending summary required."
+    echo "Before normal work, read and follow:"
+    echo "$HOME/.agents/skills/skill-update-summary/SKILL.md"
+    echo "Then process the pending reports listed in:"
+    echo "$PENDING"
+
 else
     # Если обновлений не было и ошибок тоже не было — report не нужен.
     if [ "$check_ok" -eq 1 ]; then

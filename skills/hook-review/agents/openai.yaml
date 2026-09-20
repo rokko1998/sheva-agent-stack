@@ -1,0 +1,7 @@
+interface:
+  display_name: "Hook Review"
+  short_description: "Разбирает новый или изменённый Codex hook перед Trust."
+  default_prompt: "Проверь указанный lifecycle hook по правилам SKILL.md и объясни его реальное поведение, входы, побочные эффекты и что проверить перед Trust."
+
+policy:
+  allow_implicit_invocation: false

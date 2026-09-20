@@ -2,3 +2,6 @@ interface:
   display_name: "Skill Update Summary"
   short_description: "Объясняет обновления GitHub-скиллов: что изменилось, зачем и как этим пользоваться."
   default_prompt: "Разбери pending-обновления GitHub-sourced skills по правилам SKILL.md и объясни практический смысл изменений."
+
+policy:
+  allow_implicit_invocation: false
