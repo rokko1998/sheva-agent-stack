@@ -201,7 +201,7 @@ if [ "$changed" -eq 1 ]; then
     echo "$report" >> "$PENDING"
 
     echo
-    echo "GitHub-sourced agent skills were updated."
+    echo "GitHub source changes were applied or are available for review."
     echo "Report: $report"
     echo
     echo "Before normal work, read and follow:"

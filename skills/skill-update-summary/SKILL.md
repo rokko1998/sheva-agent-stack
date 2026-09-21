@@ -1,6 +1,6 @@
 ---
 name: skill-update-summary
-description: "Analyze pending updates of GitHub-sourced agent skills and explain what changed, why it matters, how behavior changed, and how the user should use the new version. Use automatically when the SessionStart hook reports pending skill updates, or when the user asks what changed in installed skills."
+description: "Analyze pending updates of GitHub-sourced agent skills and available pinned DataWeave revisions. Use when SessionStart reports source changes or the user asks what changed in installed skills."
 ---
 
 # Skill Update Summary
@@ -42,8 +42,8 @@ Distinguish clearly between:
 ## Workflow
 
 1. Read every report path listed in `~/.local/state/agent-skill-updater/pending`.
-2. For every updated repository, read its recorded `Before` and `After` SHAs.
-3. Inspect the actual Git diff between those revisions.
+2. For every `UPDATED` repository, read its recorded `Before` and `After` SHAs. For an `AVAILABLE: ObsidianDataWeave` entry, read `Active` and `Latest`; this is an unpromoted candidate.
+3. Inspect the actual Git diff between those revisions. For DataWeave, use its clean upstream checkout and compare active to latest without changing the pinned runtime.
 4. Read changed `SKILL.md`, `agents/openai.yaml`, README/docs, hooks and scripts when relevant.
 5. Resolve symlinks under `~/.agents/skills/` to determine which changed skills are currently enabled.
 6. Prioritize changes affecting enabled skills.
@@ -58,6 +58,7 @@ Distinguish clearly between:
 10. If commit messages and actual code disagree, trust the actual diff.
 11. Use the researcher skill when understanding an update genuinely requires current external information.
 12. Do not inflate cosmetic changes into meaningful updates.
+13. For an available DataWeave revision, explain the candidate and any compatibility concerns. State explicitly that it has **not** been activated. Promotion is `python3 -m knowledge_stack promote <commit>` in the knowledge repository after review; never imply that the weekly updater performed this step.
 
 ## Output
 
