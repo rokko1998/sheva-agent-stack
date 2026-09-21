@@ -1,0 +1,7 @@
+interface:
+  display_name: "Z.A.E.B.A.L."
+  short_description: "Настройки и ручной запуск self-audit."
+  default_prompt: "Read the upstream Z.A.E.B.A.L. skill and follow its current protocol."
+
+policy:
+  allow_implicit_invocation: false
