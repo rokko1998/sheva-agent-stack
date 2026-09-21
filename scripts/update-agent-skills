@@ -2,6 +2,7 @@
 set -u
 
 ROOT="$HOME/.local/share/agent-skill-sources/github"
+KNOWLEDGE_STACK="${SHEVA_KNOWLEDGE_STACK_REPO:-/Users/sheva/Documents/Projects/sheva-knowledge-stack}"
 STATE="$HOME/.local/state/agent-skill-updater"
 REPORTS="$STATE/reports"
 
@@ -169,6 +170,27 @@ while IFS= read -r gitdir; do
 done < <(
     find "$ROOT" -type d -name .git -prune -print 2>/dev/null
 )
+
+# DataWeave is pinned by the knowledge application, not fast-forwarded here.
+if [ -f "$KNOWLEDGE_STACK/knowledge_stack/__main__.py" ]; then
+    if dependency_json=$(cd "$KNOWLEDGE_STACK" && python3 -m knowledge_stack check-updates 2>/dev/null); then
+        if [ "$(printf '%s' "$dependency_json" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["update_available"]))')" -eq 1 ]; then
+            changed=1
+            {
+                echo "## AVAILABLE: ObsidianDataWeave"
+                echo
+                printf '%s' "$dependency_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); print("Active: " + x["active"]); print("Latest: " + x["available"]); print("Promoted: no")'
+                echo
+            } >> "$report"
+        fi
+    else
+        check_ok=0
+        {
+            echo "## CHECK FAILED: ObsidianDataWeave"
+            echo
+        } >> "$report"
+    fi
+fi
 
 # Только успешная проверка считается недельной проверкой.
 if [ "$check_ok" -eq 1 ]; then

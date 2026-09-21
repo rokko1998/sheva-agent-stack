@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+
+KNOWLEDGE_STACK="${SHEVA_KNOWLEDGE_STACK_REPO:-/Users/sheva/Documents/Projects/sheva-knowledge-stack}"
+
+if [ ! -f "$KNOWLEDGE_STACK/AGENTS.md" ] || [ ! -f "$KNOWLEDGE_STACK/scripts/install_codex.py" ]; then
+    echo "Knowledge-stack repository is missing: $KNOWLEDGE_STACK" >&2
+    exit 1
+fi
+
+python3 "$KNOWLEDGE_STACK/scripts/install_codex.py"
+cd "$KNOWLEDGE_STACK"
+python3 -m knowledge_stack setup
+python3 -m knowledge_stack status
