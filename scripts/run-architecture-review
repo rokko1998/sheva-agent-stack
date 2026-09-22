@@ -1,0 +1,3 @@
+#!/bin/sh
+# Use Graphify's active uv environment for the exact installed analysis APIs.
+exec "$HOME/.local/share/uv/tools/graphifyy/bin/python3" "$(dirname "$0")/architecture-review" "$@"

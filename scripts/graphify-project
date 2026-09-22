@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Additive, active-runtime Graphify integration for one Git project."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import subprocess
+CLI = Path.home() / ".local/bin/graphify"
+REGISTRY = Path.home() / ".local/state/sheva-agent-stack/graphify-projects.json"
+START = "## graphify"
+HOOKS = (("post-commit", "# graphify-hook-start", "# graphify-hook-end", "_HOOK_SCRIPT"),
+         ("post-checkout", "# graphify-checkout-hook-start", "# graphify-checkout-hook-end", "_CHECKOUT_SCRIPT"))
+
+
+def active_assets(project: Path) -> dict:
+    shebang = CLI.read_bytes().split(b"\n", 1)[0].decode()
+    if not shebang.startswith("#!/"):
+        raise RuntimeError("Graphify launcher has no absolute Python shebang")
+    python = Path(shebang[2:])
+    code = """import json
+from pathlib import Path
+from graphify import hooks, install
+p=Path(__import__('sys').argv[1])
+cfg=hooks._load_graphifyrc(p)
+limit=cfg.get('viz_node_limit')
+viz=f'export GRAPHIFY_VIZ_NODE_LIMIT="${{GRAPHIFY_VIZ_NODE_LIMIT:-{limit}}}"\\n' if limit is not None else ''
+pin=hooks._pinned_python()
+print(json.dumps({'rules':install._always_on('agents-md'),
+ 'post-commit':hooks._HOOK_SCRIPT.replace('__PINNED_PYTHON__',pin).replace('__VIZ_LIMIT_EXPORT__',viz),
+ 'post-checkout':hooks._CHECKOUT_SCRIPT.replace('__PINNED_PYTHON__',pin).replace('__VIZ_LIMIT_EXPORT__',viz)}))"""
+    return json.loads(subprocess.check_output([str(python), "-c", code, str(project)], text=True))
+
+
+def section(text: str) -> tuple[int, int] | None:
+    offset = 0
+    start = None
+    end = None
+    for line in text.splitlines(keepends=True):
+        if line.rstrip("\r\n ") == START:
+            start = offset
+            end = offset + len(line)
+            break
+        offset += len(line)
+    if start is None:
+        return None
+    assert end is not None
+    for line in text[end:].splitlines(keepends=True):
+        if line.startswith("## "):
+            break
+        end += len(line)
+    return start, end
+
+
+def replace_rules(project: Path, rules: str) -> bool:
+    target = project / "AGENTS.md"
+    old = target.read_text() if target.exists() else ""
+    bounds = section(old)
+    if bounds:
+        first, last = bounds
+        new = old[:first] + rules.rstrip("\n") + "\n" + old[last:]
+    else:
+        new = old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + rules
+    if new != old:
+        target.write_text(new)
+        return True
+    return False
+
+
+def hook_section(text: str, start: str, end: str) -> str | None:
+    a = text.find(start)
+    b = text.find(end, a + len(start)) if a >= 0 else -1
+    return text[a:b + len(end)] if b >= 0 else None
+
+
+def hooks_path(project: Path) -> Path:
+    relative = subprocess.check_output(["git", "-C", str(project), "rev-parse", "--git-path", "hooks"], text=True).strip()
+    result = (project / relative).resolve()
+    return result.parent if result.name == "_" else result
+
+
+def status(project: Path) -> dict:
+    assets = active_assets(project)
+    agents = project / "AGENTS.md"
+    current = agents.read_text() if agents.exists() else ""
+    bounds = section(current)
+    installed = current[bounds[0]:bounds[1]].strip() if bounds else None
+    hook_info = {}
+    directory = hooks_path(project)
+    for name, start, end, _ in HOOKS:
+        file = directory / name
+        old = file.read_text() if file.exists() else ""
+        block = hook_section(old, start, end)
+        hook_info[name] = {"installed": block is not None,
+                           "current": block == assets[name].strip() if block else False}
+    native = subprocess.run([str(CLI), "hook", "status"], cwd=project, text=True,
+                            capture_output=True, check=False)
+    native_status = native.stdout.strip() if native.returncode == 0 else native.stderr.strip()
+    merge_driver_current = "merge driver: registered" in native_status
+    return {"project": str(project), "rules_installed": installed is not None,
+            "rules_current": installed == assets["rules"].strip() if installed else False,
+            "hooks": hook_info, "merge_driver_current": merge_driver_current,
+            "native_hook_status": native_status,
+            "refresh_recommended": installed != assets["rules"].strip() or
+                                   any(not x["current"] for x in hook_info.values()) or
+                                   not merge_driver_current}
+
+
+def remember(project: Path) -> None:
+    try:
+        paths = json.loads(REGISTRY.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        paths = []
+    if str(project) not in paths:
+        paths.append(str(project))
+    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    REGISTRY.write_text(json.dumps(sorted(paths), indent=2) + "\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("enable-project", "status-project", "refresh-project"))
+    parser.add_argument("project", type=Path)
+    args = parser.parse_args()
+    project = args.project.resolve()
+    subprocess.run(["git", "-C", str(project), "rev-parse", "--show-toplevel"], check=True, capture_output=True)
+    if args.action != "status-project":
+        assets = active_assets(project)
+        replace_rules(project, assets["rules"])
+        result = subprocess.run([str(CLI), "hook", "install"], cwd=project, check=True, capture_output=True, text=True)
+        remember(project)
+        print(result.stdout.strip())
+    print(json.dumps(status(project), indent=2))
+
+
+if __name__ == "__main__":
+    main()

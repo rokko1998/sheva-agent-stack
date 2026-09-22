@@ -200,8 +200,8 @@ fi
 # uv-tool build until activate-graphify promotes that source revision.
 if [ -d "$GRAPHIFY_REPO/.git" ]; then
     if graphify_json=$(python3 "$AGENT_STACK/scripts/activate-graphify" --status 2>/dev/null); then
-        graphify_flags=$(printf '%s' "$graphify_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); print(int(x["update_available"]), int(x["runtime_drift"]), int(x["source_dirty"]), int(x["source_ahead"]))')
-        read -r graphify_available graphify_drift graphify_dirty graphify_ahead <<< "$graphify_flags"
+        graphify_flags=$(printf '%s' "$graphify_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); print(int(x["update_available"]), int(x["runtime_drift"]), int(x["source_dirty"]), int(x["source_ahead"]), int(any(p.get("refresh_recommended") for p in x.get("projects", []))))')
+        read -r graphify_available graphify_drift graphify_dirty graphify_ahead graphify_project_drift <<< "$graphify_flags"
         if [ "$graphify_available" -eq 1 ] && [ "$graphify_dirty" -eq 0 ] && [ "$graphify_ahead" -eq 0 ]; then
             changed=1
             {
@@ -226,6 +226,15 @@ if [ -d "$GRAPHIFY_REPO/.git" ]; then
                 echo
                 printf '%s' "$graphify_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); print("Source dirty: " + str(x["source_dirty"])); print("Source ahead: " + str(x["source_ahead"])); print("Runtime drift: " + str(x["runtime_drift"])); [print("- " + p) for p in x["problems"]]'
                 echo "Review before running $AGENT_STACK/scripts/activate-graphify"
+                echo
+            } >> "$report"
+        fi
+        if [ "$graphify_project_drift" -eq 1 ]; then
+            changed=1
+            {
+                echo "## ATTENTION: Graphify project integration"
+                echo
+                printf '%s' "$graphify_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); [print("- " + p["project"] + ": rules/hooks stale or missing; refresh: " + str(p.get("error") or "scripts/graphify-project refresh-project " + p["project"])) for p in x.get("projects", []) if p.get("refresh_recommended")]'
                 echo
             } >> "$report"
         fi

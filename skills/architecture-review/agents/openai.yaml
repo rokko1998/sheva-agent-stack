@@ -1,0 +1,7 @@
+interface:
+  display_name: "Architecture Review"
+  short_description: "Use Graphify and Jev to review substantial code changes."
+  default_prompt: "Inspect the existing Graphify graph before a substantial change, then review the structural delta and any explicit project rules with official Jev."
+
+policy:
+  allow_implicit_invocation: true

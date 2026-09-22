@@ -21,11 +21,15 @@ REPO = Path(__file__).resolve().parent.parent
 SOURCE = HOME / ".local/share/agent-skill-sources/github/Graphify-Labs/graphify"
 SKILL = REPO / "skills/graphify"
 ACTIVE_SKILL = HOME / ".agents/skills/graphify"
+ARCH_SKILL = REPO / "skills/architecture-review"
+ACTIVE_ARCH_SKILL = HOME / ".agents/skills/architecture-review"
 STATE = Path(os.environ.get("SHEVA_GRAPHIFY_ACTIVE_STATE", HOME / ".local/state/sheva-agent-stack/graphify-active.json"))
 CONFIG = HOME / ".codex/config.toml"
 UV = HOME / ".local/bin/uv"
 CLI = HOME / ".local/bin/graphify"
 MCP = HOME / ".local/bin/graphify-mcp"
+PROJECTS = HOME / ".local/state/sheva-agent-stack/graphify-projects.json"
+PROJECT_HELPER = REPO / "scripts/graphify-project"
 
 
 def run(*args: str, cwd: Path | None = None) -> str:
@@ -84,6 +88,8 @@ def status() -> dict:
     problems = []
     if not state:
         problems.append("activation marker missing")
+    if not ACTIVE_ARCH_SKILL.is_symlink() or ACTIVE_ARCH_SKILL.resolve() != ARCH_SKILL.resolve():
+        problems.append("architecture-review skill link missing or mismatched")
     if package is None:
         problems.append("CLI/MCP missing or from different environments")
     else:
@@ -115,6 +121,16 @@ def status() -> dict:
             problems.append("Codex Graphify MCP entry missing or mismatched")
     except (OSError, tomllib.TOMLDecodeError):
         problems.append("Codex config unreadable or invalid")
+    project_status = []
+    if PROJECTS.exists() and package is not None:
+        try:
+            for project in json.loads(PROJECTS.read_text()):
+                checked = subprocess.run([sys.executable, str(PROJECT_HELPER), "status-project", project],
+                                         text=True, capture_output=True)
+                project_status.append(json.loads(checked.stdout) if checked.returncode == 0
+                                      else {"project": project, "refresh_recommended": True, "error": checked.stderr.strip()})
+        except (ValueError, OSError) as exc:
+            project_status.append({"refresh_recommended": True, "error": str(exc)})
     return {
         "source_commit": commit,
         "source_branch": run("git", "branch", "--show-current", cwd=SOURCE),
@@ -129,6 +145,7 @@ def status() -> dict:
         "cli": str(CLI),
         "mcp": str(MCP),
         "skill": str(ACTIVE_SKILL),
+        "projects": project_status,
     }
 
 
@@ -204,6 +221,7 @@ def activate() -> None:
     ensure_link(SKILL / "protocol.md", package / "skill-codex.md")
     ensure_link(SKILL / "references", package / "skills/codex/references")
     ensure_link(ACTIVE_SKILL, SKILL)
+    ensure_link(ACTIVE_ARCH_SKILL, ARCH_SKILL)
     configure_codex()
     STATE.parent.mkdir(parents=True, exist_ok=True)
     marker = {
@@ -217,6 +235,12 @@ def activate() -> None:
     temporary.write_text(json.dumps(marker, indent=2) + "\n")
     temporary.chmod(0o600)
     temporary.replace(STATE)
+    if PROJECTS.exists():
+        for project in json.loads(PROJECTS.read_text()):
+            try:
+                run(sys.executable, str(PROJECT_HELPER), "refresh-project", project)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                print(f"Graphify project refresh needs attention: {project}: {exc}", file=sys.stderr)
     result = status()
     if result["runtime_drift"] or result["update_available"]:
         raise RuntimeError(f"Graphify activation incomplete: {result['problems']}")

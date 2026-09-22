@@ -8,7 +8,7 @@ The weekly `scripts/update-agent-skills` updates clean upstream skill-source che
 
 ## Graphify structural code graph
 
-Graphify is an independent, local code-intelligence layer. The clean upstream checkout is `~/.local/share/agent-skill-sources/github/Graphify-Labs/graphify` on its `v8` branch. `scripts/activate-graphify` installs that exact checkout as an isolated `graphifyy[mcp]` uv tool, enables Codex multi-agent support, registers one global stdio `graphify` MCP server, and links `~/.agents/skills/graphify` to this repository's thin skill adapter. It does not run Graphify's installer or change AGENTS.md, hooks, or a project's application code.
+Graphify is an independent, local code-intelligence layer. The clean upstream checkout is `~/.local/share/agent-skill-sources/github/Graphify-Labs/graphify` on its `v8` branch. `scripts/activate-graphify` installs that exact checkout as an isolated `graphifyy[mcp]` uv tool, enables Codex multi-agent support, registers one global stdio `graphify` MCP server, and links `~/.agents/skills/graphify` to this repository's thin skill adapter. It also activates the separate user-owned `architecture-review` skill. It does not run Graphify's broad Codex installer or change a project's application code.
 
 The active CLI and MCP are `~/.local/bin/graphify` and `~/.local/bin/graphify-mcp` from the same uv tool environment. The adapter's `protocol.md` and `references/` symlinks point into that **installed package**, so the active Codex instructions cannot move ahead of the CLI/MCP when the weekly updater fast-forwards the upstream source. `scripts/activate-graphify --status` reports the active and available commits and detects runtime/skill drift. After reviewing an available upstream change, rerun `scripts/activate-graphify` to promote source, uv runtime, and active protocol together. Weekly update reports include the source diff and explicitly mark Graphify as available but unpromoted.
 
@@ -20,4 +20,15 @@ Build a project's local code graph only when requested:
 ~/.local/bin/graphify update /path/to/project
 ```
 
-The shared MCP server accepts `project_path` for each project; no default graph or per-project MCP entry is required. Graphify graphs are not canonical memory. This integration does not enable semantic/media extraction, a watch process, AGENTS.md injection, strict or Git hooks, architecture enforcement, or automatic Obsidian/AI Brain writes.
+The shared MCP server accepts `project_path` for each project; no default graph or per-project MCP entry is required. Graphify graphs are not canonical memory.
+
+For explicit project onboarding, `scripts/graphify-project enable-project /path/to/project` adds or refreshes only the official `## graphify` section in `AGENTS.md`, and calls native `graphify hook install` for additive `post-commit` and `post-checkout` hooks. This also registers Graphify's merge driver in local Git config and adds `graphify-out/graph.json merge=graphify` to `.gitattributes`. `status-project` compares rules and hook blocks with the **active installed runtime**; `refresh-project` updates only those owned sections. Registered projects are refreshed by manual `activate-graphify` promotion, and the weekly update summary reports stale project integration. The installed Codex `graphify hook-check` PreToolUse command is a no-op, so no such hook is installed.
+
+For a substantial implementation/refactor, the `architecture-review` skill uses Graphify `query`/`path`/`affected` for preflight, then a private baseline and native Graphify delta analysis. The official TypeSafe/SystemOne Jev classifies bounded structural and explicit-policy questions using [`policies/architecture-review/jev.md`](policies/architecture-review/jev.md); the adapter reuses the existing Keychain credential (`sheva-knowledge-stack/typesafe`) without depending on that repository at runtime. No project rule is invented. Example:
+
+```bash
+scripts/run-architecture-review baseline /path/to/project
+scripts/run-architecture-review review /path/to/project --before /private/baseline.json --update --changed-file src/example.py
+```
+
+The graph, rules, Git hooks, skill, and Jev review are advisory. This integration does not enable a watch daemon, semantic/media extraction, CI blocking, global constitution, Graphify memory, or automatic Obsidian/AI Brain writes.

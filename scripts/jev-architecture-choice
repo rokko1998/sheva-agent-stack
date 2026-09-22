@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Official TypeSafe/SystemOne bounded Choice adapter; JSON state on stdin."""
+
+from __future__ import annotations
+
+import getpass
+import json
+import os
+from pathlib import Path
+import ssl
+import subprocess
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+POLICY = Path(__file__).resolve().parent.parent / "policies/architecture-review/jev.md"
+ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+LABELS = {"structural_assessment": ("CLEAN", "CONCERN", "UNCERTAIN"),
+          "policy_compliance": ("COMPLIANT", "VIOLATED", "NOT_APPLICABLE", "UNCERTAIN")}
+
+
+def questions() -> dict:
+    lines = POLICY.read_text().splitlines()
+    preamble = []
+    result = {}
+    current = None
+    option = None
+    for line in lines:
+        if line.startswith("## "):
+            current = line[3:].strip()
+            option = None
+            result[current] = {"type": "choice", "instructions": "", "criteria": {}}
+        elif line.startswith("### "):
+            option = line[4:].strip()
+            result[current]["criteria"][option] = ""
+        elif not line.strip() or line.startswith("# "):
+            continue
+        elif current is None:
+            preamble.append(line.strip())
+        elif option is None:
+            result[current]["instructions"] += " " + line.removeprefix("Instructions:").strip()
+        else:
+            result[current]["criteria"][option] += " " + line.strip()
+    if set(result) != set(LABELS):
+        raise ValueError("Jev policy question set differs from adapter contract")
+    for name, labels in LABELS.items():
+        q = result[name]
+        if tuple(q["criteria"]) != labels or not all(q["criteria"].values()):
+            raise ValueError(f"Jev policy choices incomplete: {name}")
+        q["instructions"] = " ".join(preamble) + q["instructions"]
+    return result
+
+
+def key() -> str:
+    if os.environ.get("TYPESAFE_API_KEY"):
+        return os.environ["TYPESAFE_API_KEY"]
+    result = subprocess.run(["/usr/bin/security", "find-generic-password", "-a", getpass.getuser(),
+                             "-s", "sheva-knowledge-stack/typesafe", "-w"],
+                            text=True, capture_output=True, timeout=10)
+    if result.returncode or not result.stdout.strip():
+        raise RuntimeError("Existing TypeSafe credential unavailable")
+    return result.stdout.strip()
+
+
+def ask(state: dict) -> dict:
+    payload = {"state": state, "model": "jev-latest", "questions": questions()}
+    request = Request(ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode(),
+                      headers={"Authorization": "Bearer " + key(), "Content-Type": "application/json"},
+                      method="POST")
+    try:
+        try:
+            import certifi
+            context = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            context = ssl.create_default_context()
+        with urlopen(request, timeout=15, context=context) as response:
+            data = json.load(response)
+    except HTTPError as exc:
+        raise RuntimeError(f"TypeSafe returned HTTP {exc.code}") from exc
+    except (URLError, TimeoutError) as exc:
+        raise RuntimeError("TypeSafe API unavailable") from exc
+    raw = data.get("answers") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        raise ValueError("TypeSafe response has no answers map")
+    model = data.get("model")
+    if not isinstance(model, str) or not model:
+        raise ValueError("TypeSafe response has no model")
+    answers = {}
+    for name, labels in LABELS.items():
+        answer = raw.get(name)
+        if not isinstance(answer, dict) or answer.get("type") != "choice" or answer.get("choice") not in labels:
+            raise ValueError(f"Invalid TypeSafe Choice: {name}")
+        confidence = answer.get("confidence")
+        probabilities = answer.get("probabilities")
+        if not isinstance(confidence, (float, int)) or not 0 <= confidence <= 1:
+            raise ValueError(f"Invalid TypeSafe confidence: {name}")
+        if not isinstance(probabilities, dict) or set(probabilities) != set(labels) or any(
+            not isinstance(v, (float, int)) or not 0 <= v <= 1 for v in probabilities.values()
+        ):
+            raise ValueError(f"Invalid TypeSafe probabilities: {name}")
+        answers[name] = {"choice": answer["choice"], "confidence": confidence, "probabilities": probabilities}
+    return {"model": model, "answers": answers}
+
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps(ask(json.load(sys.stdin)), ensure_ascii=False))
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Jev architecture decision failed: {exc}", file=sys.stderr)
+        sys.exit(1)
