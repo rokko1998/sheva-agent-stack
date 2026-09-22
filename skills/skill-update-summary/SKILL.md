@@ -1,6 +1,6 @@
 ---
 name: skill-update-summary
-description: "Analyze pending updates of GitHub-sourced agent skills and available pinned DataWeave revisions. Use when SessionStart reports source changes or the user asks what changed in installed skills."
+description: "Analyze pending updates of GitHub-sourced agent skills and available pinned DataWeave or Graphify revisions. Use when SessionStart reports source changes or the user asks what changed in installed skills."
 ---
 
 # Skill Update Summary
@@ -59,6 +59,7 @@ Distinguish clearly between:
 11. Use the researcher skill when understanding an update genuinely requires current external information.
 12. Do not inflate cosmetic changes into meaningful updates.
 13. For an available DataWeave revision, explain the candidate and any compatibility concerns. State explicitly that it has **not** been activated. Promotion is `python3 -m knowledge_stack promote <commit>` in the knowledge repository after review; never imply that the weekly updater performed this step.
+14. For `AVAILABLE: Graphify`, compare source commits and changed skill, CLI, MCP, or dependency files. The updater may fast-forward the clean upstream source, but it does not promote the installed uv tool. The active Codex protocol/references are linked to that tool, so they stay aligned with CLI/MCP. State the active and available commits and version; activation is `~/.local/share/sheva-agent-stack/scripts/activate-graphify` after review. For `ATTENTION: Graphify`, explain dirty source or runtime/link drift and do not imply promotion succeeded.
 
 ## Output
 

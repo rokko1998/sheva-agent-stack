@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Activate one Graphify uv tool, Codex skill and stdio MCP without upstream installers."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+
+
+HOME = Path.home()
+REPO = Path(__file__).resolve().parent.parent
+SOURCE = HOME / ".local/share/agent-skill-sources/github/Graphify-Labs/graphify"
+SKILL = REPO / "skills/graphify"
+ACTIVE_SKILL = HOME / ".agents/skills/graphify"
+STATE = Path(os.environ.get("SHEVA_GRAPHIFY_ACTIVE_STATE", HOME / ".local/state/sheva-agent-stack/graphify-active.json"))
+CONFIG = HOME / ".codex/config.toml"
+UV = HOME / ".local/bin/uv"
+CLI = HOME / ".local/bin/graphify"
+MCP = HOME / ".local/bin/graphify-mcp"
+
+
+def run(*args: str, cwd: Path | None = None) -> str:
+    return subprocess.check_output(args, cwd=cwd, text=True, stderr=subprocess.PIPE).strip()
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def references_digest(directory: Path) -> str:
+    h = hashlib.sha256()
+    for path in sorted(directory.glob("*.md")):
+        h.update(path.name.encode())
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def source_info() -> tuple[str, str, bool]:
+    if not (SOURCE / ".git").is_dir():
+        raise RuntimeError(f"Graphify source checkout missing: {SOURCE}")
+    commit = run("git", "rev-parse", "HEAD", cwd=SOURCE)
+    version = tomllib.loads((SOURCE / "pyproject.toml").read_text())["project"]["version"]
+    dirty = bool(run("git", "status", "--porcelain", cwd=SOURCE))
+    return commit, version, dirty
+
+
+def source_ahead() -> bool:
+    return int(run("git", "rev-list", "--count", "@{u}..HEAD", cwd=SOURCE)) != 0
+
+
+def package_path() -> Path | None:
+    if not CLI.exists() or not MCP.exists():
+        return None
+    try:
+        executable = CLI.resolve().parent / "python"
+        other = MCP.resolve().parent / "python"
+        if executable != other:
+            return None
+        return Path(run(str(executable), "-c", "import graphify; print(graphify.__path__[0])"))
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def read_state() -> dict:
+    try:
+        return json.loads(STATE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def status() -> dict:
+    commit, version, dirty = source_info()
+    state = read_state()
+    package = package_path()
+    problems = []
+    if not state:
+        problems.append("activation marker missing")
+    if package is None:
+        problems.append("CLI/MCP missing or from different environments")
+    else:
+        for name, relative in (("protocol", "skill-codex.md"), ("server", "serve.py"),
+                               ("cli", "__main__.py")):
+            installed = package / relative
+            if not installed.exists() or digest(installed) != state.get(f"{name}_sha256"):
+                problems.append(f"installed {name} differs from active marker")
+        references = package / "skills/codex/references"
+        if not references.is_dir() or references_digest(references) != state.get("references_sha256"):
+            problems.append("installed Codex references missing or modified")
+        try:
+            installed_version = run(str(CLI), "--version")
+            if installed_version != f"graphify {state.get('version')}":
+                problems.append("CLI version differs from active marker")
+        except (OSError, subprocess.CalledProcessError):
+            problems.append("CLI version check failed")
+        for link, target in ((SKILL / "protocol.md", package / "skill-codex.md"),
+                             (SKILL / "references", package / "skills/codex/references"),
+                             (ACTIVE_SKILL, SKILL)):
+            if not link.is_symlink() or link.resolve() != target.resolve():
+                problems.append(f"skill link missing or mismatched: {link}")
+    try:
+        config = tomllib.loads(CONFIG.read_text())
+        if config.get("features", {}).get("multi_agent") is not True:
+            problems.append("Codex multi_agent is not enabled")
+        graphify = config.get("mcp_servers", {}).get("graphify", {})
+        if graphify.get("command") != str(MCP) or graphify.get("args") != ["--transport", "stdio"]:
+            problems.append("Codex Graphify MCP entry missing or mismatched")
+    except (OSError, tomllib.TOMLDecodeError):
+        problems.append("Codex config unreadable or invalid")
+    return {
+        "source_commit": commit,
+        "source_branch": run("git", "branch", "--show-current", cwd=SOURCE),
+        "source_version": version,
+        "source_dirty": dirty,
+        "source_ahead": source_ahead(),
+        "active_commit": state.get("commit"),
+        "active_version": state.get("version"),
+        "update_available": bool(state.get("commit") and state["commit"] != commit),
+        "runtime_drift": bool(problems),
+        "problems": problems,
+        "cli": str(CLI),
+        "mcp": str(MCP),
+        "skill": str(ACTIVE_SKILL),
+    }
+
+
+def ensure_link(link: Path, target: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() and link.resolve() == target.resolve():
+        return
+    if link.exists() or link.is_symlink():
+        if not link.is_symlink():
+            raise RuntimeError(f"Refusing to replace non-symlink: {link}")
+        link.unlink()
+    link.symlink_to(target)
+
+
+def configure_codex() -> None:
+    original = CONFIG.read_text()
+    parsed = tomllib.loads(original)
+    existing = parsed.get("mcp_servers", {}).get("graphify")
+    wanted = {"command": str(MCP), "args": ["--transport", "stdio"]}
+    if existing is not None and existing != wanted:
+        raise RuntimeError("Existing graphify MCP config differs; review it before activation")
+    updated = original
+    feature_header = re.search(r"(?m)^\[features\][ \t]*$", updated)
+    if feature_header:
+        end = re.search(r"(?m)^\[", updated[feature_header.end():])
+        stop = feature_header.end() + end.start() if end else len(updated)
+        section = updated[feature_header.end():stop]
+        if re.search(r"(?m)^multi_agent\s*=", section):
+            section = re.sub(r"(?m)^multi_agent\s*=.*$", "multi_agent = true", section)
+        else:
+            section = section.rstrip("\n") + "\nmulti_agent = true\n\n"
+        updated = updated[:feature_header.end()] + section + updated[stop:]
+    else:
+        updated = updated.rstrip("\n") + "\n\n[features]\nmulti_agent = true\n"
+    if existing is None:
+        updated = updated.rstrip("\n") + (
+            "\n\n# sheva-agent-stack Graphify stdio MCP\n"
+            "[mcp_servers.graphify]\n"
+            f'command = "{MCP}"\n'
+            'args = ["--transport", "stdio"]\n'
+        )
+    validated = tomllib.loads(updated)
+    if validated["features"]["multi_agent"] is not True or validated["mcp_servers"]["graphify"] != wanted:
+        raise RuntimeError("Codex config validation failed")
+    if updated == original:
+        return
+    backup = CONFIG.with_name(f"config.toml.graphify-{time.strftime('%Y%m%d-%H%M%S')}.bak")
+    shutil.copy2(CONFIG, backup)
+    backup.chmod(0o600)
+    temporary = CONFIG.with_name("config.toml.graphify.tmp")
+    temporary.write_text(updated)
+    temporary.chmod(0o600)
+    temporary.replace(CONFIG)
+
+
+def activate() -> None:
+    commit, version, dirty = source_info()
+    if dirty:
+        raise RuntimeError("Graphify upstream checkout is dirty; refusing activation")
+    if source_ahead():
+        raise RuntimeError("Graphify source has local commits ahead of upstream; refusing activation")
+    if read_state().get("commit") != commit or status()["runtime_drift"]:
+        run(str(UV), "tool", "install", "--force", "--reinstall-package", "graphifyy",
+            "--quiet", f"{SOURCE}[mcp]")
+    package = package_path()
+    if package is None or run(str(CLI), "--version") != f"graphify {version}":
+        raise RuntimeError("Graphify CLI/MCP environment or version is invalid")
+    for relative in ("skill-codex.md", "serve.py", "__main__.py"):
+        if digest(package / relative) != digest(SOURCE / "graphify" / relative):
+            raise RuntimeError(f"Installed {relative} does not match upstream checkout")
+    if references_digest(package / "skills/codex/references") != references_digest(SOURCE / "graphify/skills/codex/references"):
+        raise RuntimeError("Installed Codex references do not match upstream checkout")
+    ensure_link(SKILL / "protocol.md", package / "skill-codex.md")
+    ensure_link(SKILL / "references", package / "skills/codex/references")
+    ensure_link(ACTIVE_SKILL, SKILL)
+    configure_codex()
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    marker = {
+        "commit": commit, "version": version,
+        "protocol_sha256": digest(package / "skill-codex.md"),
+        "server_sha256": digest(package / "serve.py"),
+        "cli_sha256": digest(package / "__main__.py"),
+        "references_sha256": references_digest(package / "skills/codex/references"),
+    }
+    temporary = STATE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(marker, indent=2) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(STATE)
+    result = status()
+    if result["runtime_drift"] or result["update_available"]:
+        raise RuntimeError(f"Graphify activation incomplete: {result['problems']}")
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--status", action="store_true", help="Read-only source/runtime/skill drift check")
+    args = parser.parse_args()
+    try:
+        if args.status:
+            print(json.dumps(status(), indent=2))
+        else:
+            activate()
+    except (OSError, RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
+        print(f"Graphify activation failed: {exc}", file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Graphify"
+  short_description: "Query an existing structural code graph or build one on request."
+  default_prompt: "Use Graphify to inspect this project's code graph. Build a new graph only when explicitly requested or required by this task."
+
+policy:
+  allow_implicit_invocation: true

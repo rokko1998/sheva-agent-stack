@@ -2,8 +2,10 @@
 set -u
 
 ROOT="$HOME/.local/share/agent-skill-sources/github"
+AGENT_STACK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GRAPHIFY_REPO="$ROOT/Graphify-Labs/graphify"
 KNOWLEDGE_STACK="${SHEVA_KNOWLEDGE_STACK_REPO:-/Users/sheva/Documents/Projects/sheva-knowledge-stack}"
-STATE="$HOME/.local/state/agent-skill-updater"
+STATE="${SHEVA_AGENT_SKILL_UPDATER_STATE:-$HOME/.local/state/agent-skill-updater}"
 REPORTS="$STATE/reports"
 
 LAST_CHECK="$STATE/last-check"
@@ -85,6 +87,7 @@ while IFS= read -r gitdir; do
             echo "Reason: dirty worktree."
             echo
         } >> "$report"
+        if [ "$repo" = "$GRAPHIFY_REPO" ]; then changed=1; fi
         continue
     fi
 
@@ -124,6 +127,7 @@ while IFS= read -r gitdir; do
             echo "Reason: local branch contains commits not present upstream."
             echo
         } >> "$report"
+        if [ "$repo" = "$GRAPHIFY_REPO" ]; then changed=1; fi
         continue
     fi
 
@@ -187,6 +191,48 @@ if [ -f "$KNOWLEDGE_STACK/knowledge_stack/__main__.py" ]; then
         check_ok=0
         {
             echo "## CHECK FAILED: ObsidianDataWeave"
+            echo
+        } >> "$report"
+    fi
+fi
+
+# Graphify source may fast-forward above; CLI, MCP and skill stay on one active
+# uv-tool build until activate-graphify promotes that source revision.
+if [ -d "$GRAPHIFY_REPO/.git" ]; then
+    if graphify_json=$(python3 "$AGENT_STACK/scripts/activate-graphify" --status 2>/dev/null); then
+        graphify_flags=$(printf '%s' "$graphify_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); print(int(x["update_available"]), int(x["runtime_drift"]), int(x["source_dirty"]), int(x["source_ahead"]))')
+        read -r graphify_available graphify_drift graphify_dirty graphify_ahead <<< "$graphify_flags"
+        if [ "$graphify_available" -eq 1 ] && [ "$graphify_dirty" -eq 0 ] && [ "$graphify_ahead" -eq 0 ]; then
+            changed=1
+            {
+                echo "## AVAILABLE: Graphify"
+                echo
+                printf '%s' "$graphify_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); print("Active: " + x["active_commit"] + " (" + x["active_version"] + ")"); print("Latest source: " + x["source_commit"] + " (" + x["source_version"] + ")"); print("CLI/MCP/skill promoted: no")'
+                echo "Promote together: $AGENT_STACK/scripts/activate-graphify"
+                echo
+                echo "### Commits since active runtime"
+                active_commit=$(printf '%s' "$graphify_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["active_commit"])')
+                git -C "$GRAPHIFY_REPO" log --no-merges --pretty='- %h %s' "$active_commit..HEAD" || true
+                echo
+                echo "### Changed files since active runtime"
+                git -C "$GRAPHIFY_REPO" diff --name-status "$active_commit..HEAD" || true
+                echo
+            } >> "$report"
+        fi
+        if [ "$graphify_drift" -eq 1 ] || [ "$graphify_dirty" -eq 1 ] || [ "$graphify_ahead" -eq 1 ]; then
+            changed=1
+            {
+                echo "## ATTENTION: Graphify"
+                echo
+                printf '%s' "$graphify_json" | python3 -c 'import json,sys; x=json.load(sys.stdin); print("Source dirty: " + str(x["source_dirty"])); print("Source ahead: " + str(x["source_ahead"])); print("Runtime drift: " + str(x["runtime_drift"])); [print("- " + p) for p in x["problems"]]'
+                echo "Review before running $AGENT_STACK/scripts/activate-graphify"
+                echo
+            } >> "$report"
+        fi
+    else
+        check_ok=0
+        {
+            echo "## CHECK FAILED: Graphify activation status"
             echo
         } >> "$report"
     fi
