@@ -27,8 +27,8 @@ For explicit project onboarding, `scripts/graphify-project enable-project /path/
 For a substantial implementation/refactor, the `architecture-review` skill uses Graphify `query`/`path`/`affected` for preflight, then a private baseline and native Graphify delta analysis. The official TypeSafe/SystemOne Jev classifies bounded structural and explicit-policy questions using [`policies/architecture-review/jev.md`](policies/architecture-review/jev.md); the adapter reuses the existing Keychain credential (`sheva-knowledge-stack/typesafe`) without depending on that repository at runtime. No project rule is invented. Example:
 
 ```bash
-scripts/run-architecture-review baseline /path/to/project
-scripts/run-architecture-review review /path/to/project --before /private/baseline.json --update --changed-file src/example.py
+scripts/architecture-review baseline /path/to/project
+scripts/architecture-review review /path/to/project --before /private/baseline.json --update --changed-file src/example.py
 ```
 
 The graph, rules, Git hooks, skill, and Jev review are advisory. This integration does not enable a watch daemon, semantic/media extraction, CI blocking, global constitution, Graphify memory, or automatic Obsidian/AI Brain writes.

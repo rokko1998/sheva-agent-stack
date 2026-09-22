@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Graphify baseline/delta analyzer with optional official Jev Choice review."""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import uuid
+
+from graphify.affected import affected_nodes, load_graph
+from graphify.analyze import find_import_cycles, god_nodes, graph_diff
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE_ROOT = Path.home() / ".local/state/sheva-agent-stack/architecture-review"
+CLI = Path.home() / ".local/bin/graphify"
+
+
+def graph_summary(graph) -> dict:
+    communities = {str(data.get("community")) for _, data in graph.nodes(data=True) if data.get("community") is not None}
+    return {"nodes": graph.number_of_nodes(), "edges": graph.number_of_edges(),
+            "communities": len(communities), "god_nodes": god_nodes(graph, top_n=8),
+            "import_cycles": find_import_cycles(graph, top_n=20)}
+
+
+def architecture_view(graph):
+    """Ignore markdown heading nodes added by Graphify update to code-only graphs."""
+    return graph.subgraph([node for node, data in graph.nodes(data=True)
+                           if data.get("file_type") != "document"]).copy()
+
+
+def baseline(project: Path) -> dict:
+    source = project / "graphify-out/graph.json"
+    if not source.is_file():
+        raise RuntimeError(f"Graphify graph missing: {source}")
+    digest = hashlib.sha256(str(project).encode()).hexdigest()[:16]
+    directory = STATE_ROOT / digest
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}.json"
+    shutil.copyfile(source, destination)
+    destination.chmod(0o600)
+    return {"project": str(project), "baseline": str(destination),
+            "summary": graph_summary(architecture_view(load_graph(destination)))}
+
+
+def canonical_cycle_key(cycle: list[str]) -> tuple[str, ...]:
+    """Canonicalize a directed cycle by rotation while preserving direction."""
+    values = tuple(str(node) for node in cycle)
+    if len(values) > 1 and values[0] == values[-1]:
+        values = values[:-1]
+    if not values:
+        return ()
+    return min(values[index:] + values[:index] for index in range(len(values)))
+
+
+def cycle_keys(records: list[dict]) -> set[tuple[str, ...]]:
+    return {key for record in records if (key := canonical_cycle_key(record["cycle"]))}
+
+
+def cited_lines(location: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"L([1-9][0-9]*)(?:-L?([1-9][0-9]*))?", location)
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2) or start)
+    if end < start or end - start > 50:
+        return None
+    return start, end
+
+
+def project_file(project: Path, supplied: object) -> Path | None:
+    if not isinstance(supplied, str) or not supplied or Path(supplied).is_absolute():
+        return None
+    root = project.resolve()
+    candidate = (root / supplied).resolve()
+    return candidate if candidate.is_relative_to(root) and candidate.is_file() else None
+
+
+def verify_explicit_rule(project: Path, rule: dict) -> bool:
+    source = project_file(project, rule.get("source_file"))
+    bounds = cited_lines(str(rule.get("source_location") or ""))
+    text = rule.get("text")
+    if source is None or bounds is None or not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        return False
+    start, end = bounds
+    if end > len(lines):
+        return False
+    cited = "\n".join(lines[start - 1:end])
+    return " ".join(cited.split()) == " ".join(text.split())
+
+
+def verified_rule_edge(project: Path, edge: dict, rules: list[dict]) -> bool:
+    project = project.resolve()
+    for rule in rules:
+        evidence = rule.get("matched_evidence")
+        if rule.get("matched") is not True or not isinstance(evidence, dict):
+            continue
+        if any(evidence.get(key) != edge.get(key) for key in ("source", "target", "relation")):
+            continue
+        if evidence.get("source_file") != edge.get("source_file") or evidence.get("source_location") != edge.get("source_location"):
+            continue
+        excerpt = evidence.get("source_excerpt")
+        match = re.fullmatch(r"L([1-9][0-9]*)", str(edge.get("source_location") or ""))
+        if not isinstance(excerpt, str) or not excerpt.strip() or len(excerpt) > 200 or not match:
+            continue
+        source = project_file(project, edge.get("source_file"))
+        if source is None:
+            continue
+        try:
+            lines = source.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        line = int(match.group(1))
+        if line <= len(lines) and excerpt.strip() in lines[line - 1]:
+            return True
+    return False
+
+
+def change_state(project: Path, before: Path, after: Path, changed_files: list[str], rules: list[dict]) -> dict:
+    old_raw = load_graph(before)
+    new_raw = load_graph(after)
+    old = architecture_view(old_raw)
+    new = architecture_view(new_raw)
+    native = graph_diff(old, new)
+    old_summary = graph_summary(old)
+    new_summary = graph_summary(new)
+    structural_empty = not any(native[key] for key in ("new_nodes", "removed_nodes", "new_edges", "removed_edges"))
+    cluster_metadata_changed = structural_empty and old_summary["communities"] != new_summary["communities"]
+    if structural_empty:
+        new_summary["communities"] = old_summary["communities"]
+    old_cycles = cycle_keys(old_summary["import_cycles"])
+    new_cycles = cycle_keys(new_summary["import_cycles"])
+    new_edge_details = []
+    cross = []
+    for edge in native["new_edges"]:
+        u, v = edge["source"], edge["target"]
+        raw = new.get_edge_data(u, v) or {}
+        if new.is_multigraph():
+            raw = next(iter(raw.values()), {})
+        detail = {**edge, "source_file": raw.get("source_file"),
+                  "source_location": raw.get("source_location"),
+                  "source_verified": False}
+        detail["source_verified"] = verified_rule_edge(project, detail, rules)
+        new_edge_details.append(detail)
+        if u in old and v in old:
+            uc, vc = old.nodes[u].get("community"), old.nodes[v].get("community")
+            detail["community_boundary_basis"] = "BASELINE"
+        else:
+            uc, vc = new.nodes[u].get("community"), new.nodes[v].get("community")
+            detail["community_boundary_basis"] = "POST_CHANGE_NEW_NODE"
+        crosses = uc is not None and vc is not None and uc != vc
+        detail["crosses_community_boundary"] = crosses
+        if crosses:
+            cross.append(detail)
+    common = set(old.nodes) & set(new.nodes)
+    coupling = sorted(({"node": n, "label": new.nodes[n].get("label", n),
+                        "before": old.degree(n), "after": new.degree(n),
+                        "delta": new.degree(n) - old.degree(n)} for n in common
+                       if old.degree(n) != new.degree(n)), key=lambda x: abs(x["delta"]), reverse=True)
+    seeds = list(dict.fromkeys([x["id"] for x in native["new_nodes"] if x["id"] in new]
+                              + [x["source"] for x in native["new_edges"]]
+                              + [x["target"] for x in native["new_edges"]]))[:20]
+    blast = []
+    for seed in seeds:
+        before_count = len(affected_nodes(old, seed, depth=2)) if seed in old else 0
+        after_count = len(affected_nodes(new, seed, depth=2))
+        if before_count != after_count:
+            blast.append({"node": seed, "before": before_count, "after": after_count,
+                          "delta": after_count - before_count})
+    before_gods = {x["id"] for x in old_summary["god_nodes"]}
+    after_gods = {x["id"] for x in new_summary["god_nodes"]}
+    checked_rules = json.loads(json.dumps(rules))
+    for rule in checked_rules:
+        rule["source_verified"] = verify_explicit_rule(project, rule)
+        evidence = rule.get("matched_evidence")
+        if isinstance(evidence, dict):
+            evidence["source_verified"] = any(
+                edge["source_verified"] and all(evidence.get(key) == edge.get(key)
+                                                for key in ("source", "target", "relation"))
+                for edge in new_edge_details)
+            evidence.pop("source_excerpt", None)
+    reliable_policy_evidence = []
+    reliable_edges = {(e["source"], e["target"], e["relation"]): e for e in new_edge_details
+                      if e["confidence"] == "EXTRACTED" and e["source_verified"]}
+    for rule in checked_rules:
+        evidence = rule.get("matched_evidence")
+        if (rule.get("matched") is not True or rule.get("source_verified") is not True or
+                not isinstance(evidence, dict) or evidence.get("source_verified") is not True):
+            continue
+        key = (evidence.get("source"), evidence.get("target"), evidence.get("relation"))
+        if key in reliable_edges:
+            reliable_policy_evidence.append({
+                "rule_source_file": rule["source_file"],
+                "rule_source_location": rule["source_location"],
+                "rule_text": rule["text"],
+                "rule_source_verified": True,
+                "edge": reliable_edges[key],
+            })
+    return {
+        "project": str(project), "changed_files": changed_files,
+        "graph_before": {k: old_summary[k] for k in ("nodes", "edges", "communities")},
+        "graph_after": {k: new_summary[k] for k in ("nodes", "edges", "communities")},
+        "added_nodes": native["new_nodes"][:80], "removed_nodes": native["removed_nodes"][:80],
+        "added_edges": new_edge_details[:80], "removed_edges": native["removed_edges"][:80],
+        "new_cycles": [dict(cycle=list(x), length=len(x)) for x in sorted(new_cycles - old_cycles)],
+        "removed_cycles": [dict(cycle=list(x), length=len(x)) for x in sorted(old_cycles - new_cycles)],
+        "existing_cycles": [dict(cycle=list(x), length=len(x)) for x in sorted(old_cycles & new_cycles)],
+        "new_cross_community_edges": cross[:40],
+        "coupling_delta": coupling[:20], "blast_radius_delta": blast[:20],
+        "god_node_changes": {"new_top_nodes": sorted(after_gods - before_gods),
+                             "removed_top_nodes": sorted(before_gods - after_gods)},
+        "structural_growth": {"nodes": new.number_of_nodes() - old.number_of_nodes(),
+                              "edges": new.number_of_edges() - old.number_of_edges()},
+        "graphify_confidence_provenance": dict(Counter(str(e.get("confidence") or "UNSPECIFIED") for e in new_edge_details)),
+        "explicit_project_rules": checked_rules,
+        "matched_project_rules": [rule for rule in checked_rules if rule.get("matched") is True],
+        "reliable_policy_evidence": reliable_policy_evidence,
+        "graphify_native_diff_summary": native["summary"],
+        "noncode_document_nodes_added_by_update": sum(1 for _, d in new_raw.nodes(data=True)
+                                                   if d.get("file_type") == "document") - sum(
+                                                       1 for _, d in old_raw.nodes(data=True)
+                                                       if d.get("file_type") == "document"),
+        "cluster_metadata_changed_without_structural_delta": cluster_metadata_changed,
+        "truncated": {"nodes": len(native["new_nodes"]) > 80 or len(native["removed_nodes"]) > 80,
+                      "edges": len(new_edge_details) > 80 or len(native["removed_edges"]) > 80},
+    }
+
+
+def outcome(state: dict, response: dict) -> dict:
+    choices = {name: value["choice"] for name, value in response["answers"].items()}
+    corrections = []
+    if state.get("new_cycles") and choices["structural_assessment"] == "CLEAN":
+        choices["structural_assessment"] = "CONCERN"
+        corrections.append("A new import cycle cannot be classified CLEAN")
+    truncated = state.get("truncated") or {}
+    if any(truncated.get(kind) is True for kind in ("nodes", "edges")) and choices["structural_assessment"] == "CLEAN":
+        choices["structural_assessment"] = "UNCERTAIN"
+        corrections.append("A truncated material structural delta cannot be classified CLEAN")
+    if choices["policy_compliance"] == "VIOLATED":
+        added = {(edge.get("source"), edge.get("target"), edge.get("relation"))
+                 for edge in state.get("added_edges", [])
+                 if edge.get("confidence") == "EXTRACTED" and edge.get("source_verified") is True}
+        reliable = [item for item in state.get("reliable_policy_evidence", [])
+                    if item.get("rule_source_verified") is True and isinstance(item.get("edge"), dict)
+                    and item["edge"].get("confidence") == "EXTRACTED"
+                    and item["edge"].get("source_verified") is True
+                    and (item["edge"].get("source"), item["edge"].get("target"),
+                         item["edge"].get("relation")) in added]
+        if not reliable:
+            choices["policy_compliance"] = "UNCERTAIN"
+            corrections.append("VIOLATED requires a verified explicit rule and matching verified EXTRACTED edge")
+    elif choices["policy_compliance"] == "COMPLIANT" and not any(
+            rule.get("matched") is True and rule.get("source_verified") is True
+            for rule in state.get("matched_project_rules", [])):
+        choices["policy_compliance"] = "NOT_APPLICABLE"
+        corrections.append("COMPLIANT requires an applicable verified explicit project rule")
+    if choices["policy_compliance"] == "VIOLATED":
+        result = "NEEDS_REVIEW"
+    elif "UNCERTAIN" in choices.values():
+        result = "NEEDS_REVIEW"
+    elif choices["structural_assessment"] == "CONCERN":
+        result = "CONCERN"
+    else:
+        result = "PASS"
+    return {"choices": choices, "outcome": result,
+            "requires_inspection": "UNCERTAIN" in choices.values(),
+            "safety_corrections": corrections}
+
+
+def graphify_update(project: Path) -> subprocess.CompletedProcess[str]:
+    update_env = os.environ.copy()
+    update_env["PYTHONHASHSEED"] = "0"
+    return subprocess.run([str(CLI), "update", str(project)], text=True, capture_output=True,
+                          check=True, env=update_env)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="scripts/architecture-review", description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    b = sub.add_parser("baseline", help="save private pre-change graph snapshot")
+    b.add_argument("project", type=Path)
+    r = sub.add_parser("review", help="compare graph snapshots and call official Jev")
+    r.add_argument("project", type=Path)
+    r.add_argument("--before", type=Path, required=True)
+    r.add_argument("--after", type=Path)
+    r.add_argument("--changed-file", action="append", default=[])
+    r.add_argument("--rules-file", type=Path, help="JSON array of explicit cited project rules; matched=true only when applicable")
+    r.add_argument("--update", action="store_true", help="run Graphify AST-only update before review")
+    r.add_argument("--no-jev", action="store_true", help="inspect native graph delta without remote decision")
+    args = parser.parse_args()
+    project = args.project.resolve()
+    if args.action == "baseline":
+        print(json.dumps(baseline(project), indent=2, ensure_ascii=False))
+        return
+    if args.update:
+        updated = graphify_update(project)
+        if updated.stderr:
+            print(updated.stderr, file=sys.stderr, end="")
+    after = args.after or (project / "graphify-out/graph.json")
+    rules = json.loads(args.rules_file.read_text()) if args.rules_file else []
+    if (not isinstance(rules, list) or len(rules) > 50 or
+            any(not isinstance(x, dict) or not isinstance(x.get("source_file"), str) or
+                not isinstance(x.get("source_location"), str) or
+                not isinstance(x.get("text"), str) or not x["source_file"] or
+                not x["source_location"] or not x["text"] or
+                len(x["source_file"]) > 1000 or len(x["source_location"]) > 32 or
+                len(x["text"]) > 2000 for x in rules)):
+        raise ValueError("Rules require project-relative source_file, source_location and text")
+    if len(args.changed_file) > 100 or any(len(path) > 1000 for path in args.changed_file):
+        raise ValueError("Changed-file list is too large")
+    state = change_state(project, args.before, after, args.changed_file, rules)
+    result = {"state": state}
+    if not args.no_jev:
+        jev = ROOT / "scripts/jev-architecture-choice"
+        response = subprocess.run([sys.executable, str(jev)], input=json.dumps(state, ensure_ascii=False),
+                                  text=True, capture_output=True)
+        if response.returncode:
+            raise RuntimeError(response.stderr.strip() or "Jev architecture decision failed")
+        decision = json.loads(response.stdout)
+        result["jev"] = decision
+        result["decision"] = outcome(state, decision)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"Architecture review failed: {exc}", file=sys.stderr)
+        sys.exit(1)

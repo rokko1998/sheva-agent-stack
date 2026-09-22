@@ -14,7 +14,7 @@ import networkx as nx
 from networkx.readwrite import json_graph
 
 ROOT = Path(__file__).resolve().parent.parent
-review = runpy.run_path(str(ROOT / "scripts/architecture-review"))
+review = runpy.run_path(str(ROOT / "scripts/architecture_review.py"))
 
 
 def base_graph() -> nx.DiGraph:
@@ -37,15 +37,20 @@ def write_graph(path: Path, graph: nx.DiGraph) -> None:
     path.write_text(json.dumps(json_graph.node_link_data(graph, edges="links")))
 
 
-def decide(state: dict) -> tuple[str, str, str, list]:
+def decide(state: dict) -> dict:
     process = subprocess.run([shutil.which("python3") or sys.executable,
                               str(ROOT / "scripts/jev-architecture-choice")],
                              input=json.dumps(state), text=True, capture_output=True, check=True)
     raw = json.loads(process.stdout)
     result = review["outcome"](state, raw)
-    return (raw["answers"]["structural_assessment"]["choice"],
-            raw["answers"]["policy_compliance"]["choice"],
-            result["outcome"], result["safety_corrections"])
+    return {
+        "Jev_structural": raw["answers"]["structural_assessment"]["choice"],
+        "Jev_policy": raw["answers"]["policy_compliance"]["choice"],
+        "effective_structural": result["choices"]["structural_assessment"],
+        "effective_policy": result["choices"]["policy_compliance"],
+        "outcome": result["outcome"],
+        "safety_corrections": result["safety_corrections"],
+    }
 
 
 def main() -> None:
@@ -62,7 +67,8 @@ def main() -> None:
     c = initial.copy()
     add_edge(c, "service", "api")
     cases.append(("C new import cycle", initial, c, []))
-    rule = [{"source": "fixture-policy:1", "text": "API layer must not depend directly on persistence", "matched": True,
+    rule = [{"source_file": "architecture.md", "source_location": "L1",
+             "text": "API layer must not depend directly on persistence", "matched": True,
              "role_mapping": {"api": "API layer", "repo": "Repository in persistence layer"},
              "matched_evidence": {"source": "api", "target": "repo", "relation": "imports_from",
                                   "source_file": "api.py", "source_location": "L3",
@@ -75,9 +81,12 @@ def main() -> None:
     f = initial.copy()
     add_edge(f, "service", "api")
     cases.append(("F existing cycle before baseline", f, f.copy(), []))
+    fabricated = [{**rule[0], "text": "Invented rule that does not exist in the cited source"}]
+    cases.append(("G fabricated rule with real violating edge", initial, b, fabricated))
 
     with tempfile.TemporaryDirectory(prefix="graphify-arch-fixture-") as temporary:
         directory = Path(temporary)
+        (directory / "architecture.md").write_text("API layer must not depend directly on persistence\n")
         (directory / "api.py").write_text("def endpoint():\n    pass\nfrom repo import Repository\n")
         for index, (name, old, new, rules) in enumerate(cases):
             before = directory / f"{index}-before.json"
@@ -85,13 +94,14 @@ def main() -> None:
             write_graph(before, old)
             write_graph(after, new)
             state = review["change_state"](directory, before, after, ["fixture.py"], rules)
-            structure, policy, outcome, corrections = decide(state)
+            decision = decide(state)
             print(json.dumps({"case": name, "native_diff": state["graphify_native_diff_summary"],
                               "new_cycles": len(state["new_cycles"]),
                               "existing_cycles": len(state["existing_cycles"]),
                               "cross_edges": len(state["new_cross_community_edges"]),
-                              "Jev_structural": structure, "Jev_policy": policy,
-                              "outcome": outcome, "safety_corrections": corrections}))
+                              "verified_rules": sum(rule.get("source_verified") is True
+                                                    for rule in state["explicit_project_rules"]),
+                              **decision}))
 
 
 if __name__ == "__main__":
