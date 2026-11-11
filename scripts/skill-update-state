@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Acknowledge exact update candidates and deduplicate pending reports."""
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+
+STATE = Path(os.environ.get('SHEVA_AGENT_SKILL_UPDATER_STATE', Path.home() / '.local/state/agent-skill-updater'))
+
+
+def blocks(path):
+    return re.findall(r'^## .+?(?=^## |\Z)', path.read_text(), re.M | re.S)
+
+
+def identity(block):
+    lines = block.splitlines()
+    revisions = [line.strip() for line in lines if re.match(r'^(Before|After|Active|Latest(?: source)?):', line)]
+    key = '\n'.join([lines[0], *(revisions or lines[1:])]).strip()
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+@contextmanager
+def locked():
+    STATE.mkdir(parents=True, exist_ok=True)
+    with (STATE / 'processed.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def read_processed():
+    try:
+        return json.loads((STATE / 'processed.json').read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def pending_paths():
+    p = STATE / 'pending'
+    return [Path(line) for line in p.read_text().splitlines() if line.strip()] if p.exists() else []
+
+
+def write_pending(paths):
+    pending = STATE / 'pending'
+    if paths:
+        tmp = STATE / 'pending.tmp'
+        tmp.write_text(''.join(str(p) + '\n' for p in paths))
+        tmp.replace(pending)
+    else:
+        pending.unlink(missing_ok=True)
+
+
+def enqueue(report):
+    with locked():
+        processed = read_processed()
+        pending = pending_paths()
+        queued = {identity(b) for p in pending if p.exists() for b in blocks(p)}
+        fresh = [b for b in blocks(report) if identity(b) not in processed and identity(b) not in queued]
+        if not fresh:
+            return False
+        report.write_text('# Agent skill source update\n\n' + '\n'.join(fresh))
+        write_pending([*pending, report])
+        return True
+
+
+def acknowledge(reports, decision):
+    with locked():
+        processed = read_processed()
+        for report in reports:
+            for block in blocks(report):
+                processed[identity(block)] = dict(decision=decision, report=str(report),
+                    title=block.splitlines()[0], at=datetime.now(timezone.utc).isoformat())
+        tmp = STATE / 'processed.json.tmp'
+        tmp.write_text(json.dumps(processed, ensure_ascii=False, indent=2) + '\n')
+        tmp.replace(STATE / 'processed.json')
+        done = {p.resolve() for p in reports}
+        write_pending([p for p in pending_paths() if p.resolve() not in done])
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    subs = parser.add_subparsers(dest='command', required=True)
+    enq = subs.add_parser('enqueue')
+    enq.add_argument('report', type=Path)
+    ack = subs.add_parser('ack')
+    ack.add_argument('reports', type=Path, nargs='+')
+    ack.add_argument('--decision', choices=['reviewed', 'updated', 'ignored'], required=True)
+    args = parser.parse_args()
+    if args.command == 'enqueue':
+        raise SystemExit(0 if enqueue(args.report) else 3)
+    acknowledge(args.reports, args.decision)

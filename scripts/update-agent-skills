@@ -1,8 +1,15 @@
 #!/bin/bash
 set -u
 
-ROOT="$HOME/.local/share/agent-skill-sources/github"
-AGENT_STACK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${SHEVA_AGENT_SKILL_SOURCES_ROOT:-$HOME/.local/share/agent-skill-sources/github}"
+# SessionStart invokes the ~/.local/bin symlink, not this checkout's path.
+script_source="${BASH_SOURCE[0]}"
+while [ -L "$script_source" ]; do
+    script_directory="$(cd "$(dirname "$script_source")" && pwd)"
+    script_source="$(readlink "$script_source")"
+    case "$script_source" in /*) ;; *) script_source="$script_directory/$script_source" ;; esac
+done
+AGENT_STACK="$(cd "$(dirname "$script_source")/.." && pwd)"
 GRAPHIFY_REPO="$ROOT/Graphify-Labs/graphify"
 KNOWLEDGE_STACK="${SHEVA_KNOWLEDGE_STACK_REPO:-/Users/sheva/Documents/Projects/sheva-knowledge-stack}"
 STATE="${SHEVA_AGENT_SKILL_UPDATER_STATE:-$HOME/.local/state/agent-skill-updater}"
@@ -62,7 +69,7 @@ fi
 export GIT_TERMINAL_PROMPT=0
 
 stamp=$(date '+%Y%m%d-%H%M%S')
-report="$REPORTS/$stamp.md"
+report=$("${SHEVA_AGENT_SKILL_UPDATER_PYTHON:-${PYTHON:-python3}}" -c 'import os,sys,tempfile; fd,p=tempfile.mkstemp(prefix=sys.argv[2]+"-",suffix=".md",dir=sys.argv[1]); os.close(fd); print(p)' "$REPORTS" "$stamp")
 
 changed=0
 check_ok=1
@@ -135,25 +142,17 @@ while IFS= read -r gitdir; do
         continue
     fi
 
-    if ! git -C "$repo" merge --ff-only "$upstream" --quiet; then
-        {
-            echo "## UPDATE FAILED: $repo"
-            echo
-        } >> "$report"
-
-        check_ok=0
-        continue
-    fi
-
-    after=$(git -C "$repo" rev-parse HEAD)
-
+    # Fetch is read-only for enabled skills. Applying the source revision is
+    # an explicit update/ignore decision, not a SessionStart side effect.
+    after=$(git -C "$repo" rev-parse "$upstream")
     changed=1
 
     {
-        echo "## UPDATED: $repo"
+        echo "## AVAILABLE: Source $repo"
         echo
         echo "Before: $before"
         echo "After:  $after"
+        echo "Source checkout advanced: no"
         echo
 
         echo "### Commits"
@@ -252,11 +251,10 @@ if [ "$check_ok" -eq 1 ]; then
     touch "$LAST_CHECK"
 fi
 
-if [ "$changed" -eq 1 ]; then
-    echo "$report" >> "$PENDING"
+if [ "$changed" -eq 1 ] && "${SHEVA_AGENT_SKILL_UPDATER_PYTHON:-${PYTHON:-python3}}" "$AGENT_STACK/scripts/skill-update-state" enqueue "$report"; then
 
     echo
-    echo "GitHub source changes were applied or are available for review."
+    echo "New skill updates need one update/ignore decision. Do not repeat changelog reports."
     echo "Report: $report"
     echo
     echo "Before normal work, read and follow:"

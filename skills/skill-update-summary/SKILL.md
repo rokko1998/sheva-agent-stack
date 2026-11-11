@@ -1,94 +1,29 @@
 ---
 name: skill-update-summary
-description: "Analyze pending updates of GitHub-sourced agent skills and available pinned DataWeave or Graphify revisions. Use when SessionStart reports source changes or the user asks what changed in installed skills."
+description: Handle new local skill-update notices once, offer update or ignore, and record the exact reviewed revisions.
 ---
 
-# Skill Update Summary
+# Skill update decisions
 
-Analyze updates recorded by the local agent-skill updater.
+Read the reports listed in `~/.local/state/agent-skill-updater/pending`.
+The updater deduplicates candidates using their exact active/latest or before/after revisions.
+Historical reports stay in `~/.local/state/agent-skill-updater/reports/`.
 
-Pending report list:
+For a new notice, inspect its metadata and enabled-skill links privately, then ask only a short question naming the actionable component and version: **«Доступно обновление Graphify до … Обновить или проигнорировать?»** Use the available user-input tool. Do not send a changelog, a mandatory preamble, or stop unrelated work while awaiting the choice. Explain details only if the user asks, or briefly identify an actual installation blocker.
 
-`~/.local/state/agent-skill-updater/pending`
+Immediately after presenting the question, mark those report paths reviewed so another chat does not repeat the same notice:
 
-GitHub source repositories:
+```sh
+~/.local/share/sheva-agent-stack/scripts/skill-update-state ack <report-path> --decision reviewed
+```
 
-`~/.local/share/agent-skill-sources/github/`
+An existing explicit update/ignore instruction is the decision: act without asking again, then acknowledge with `--decision updated` or `--decision ignored`. Keep a pending choice in the current conversation; marking it reviewed is not approval to install. Do not mark a failed installation updated. If acknowledgment fails, report that the notice has not been marked handled.
 
-Enabled Codex skills:
+For an approved update, inspect the actual revision diff before activation. Resolve enabled skills through their symlinks. Preserve local modifications, credentials, and unrelated configuration. Updating a source repository does not authorize installing unrelated products from it (for example Linux desktop dotfiles).
 
-`~/.agents/skills/`
+- Source reports identify `Before` and `After` SHAs. After approval, check that the checkout still matches `Before` and is clean, inspect that exact diff, then fast-forward to `After`. Never overwrite local work or silently substitute a newer unreviewed revision.
+- Graphify CLI, MCP, and Codex protocol/references must move together. Use `~/.local/share/sheva-agent-stack/scripts/activate-graphify`, verify its resulting status and installed version. Preserve explicit project rules when refreshing integration. Do not claim a running MCP process has restarted without evidence.
+- ObsidianDataWeave remains pinned until explicitly promoted with `python3 -m knowledge_stack promote <commit>` in the knowledge repository. Source updates alone do not activate it.
+- Dirty source, runtime/link drift, or failed dependency checks are blockers to resolve or explain, not successful updates.
 
-## Goal
-
-Do not merely repeat commit messages.
-
-Explain the update as if teaching the owner of this agent environment:
-
-- what actually changed;
-- what problem the change solves;
-- why the author implemented it this way when that can be established from the code or documentation;
-- whether agent behavior or automatic skill activation changed;
-- whether usage changed;
-- whether installation, dependencies, permissions, scripts, hooks, network behavior, or security boundaries changed;
-- whether new skills or capabilities appeared;
-- whether the user needs to do anything.
-
-Distinguish clearly between:
-- facts established by the diff or repository documentation;
-- reasonable inference;
-- external research.
-
-## Workflow
-
-1. Read every report path listed in `~/.local/state/agent-skill-updater/pending`.
-2. For every `UPDATED` repository, read its recorded `Before` and `After` SHAs. For an `AVAILABLE: ObsidianDataWeave` entry, read `Active` and `Latest`; this is an unpromoted candidate.
-3. Inspect the actual Git diff between those revisions. For DataWeave, use its clean upstream checkout and compare active to latest without changing the pinned runtime.
-4. Read changed `SKILL.md`, `agents/openai.yaml`, README/docs, hooks and scripts when relevant.
-5. Resolve symlinks under `~/.agents/skills/` to determine which changed skills are currently enabled.
-6. Prioritize changes affecting enabled skills.
-7. Separately mention interesting newly added skills or capabilities that are not enabled.
-8. Treat metadata changes as behavioral changes when they affect:
-   - `name`;
-   - `description`;
-   - OpenAI metadata;
-   - implicit invocation behavior;
-   - trigger wording.
-9. Treat changes to scripts, hooks, network access, dependencies, credentials, permissions or filesystem behavior as security-sensitive and explain them explicitly.
-10. If commit messages and actual code disagree, trust the actual diff.
-11. Use the researcher skill when understanding an update genuinely requires current external information.
-12. Do not inflate cosmetic changes into meaningful updates.
-13. For an available DataWeave revision, explain the candidate and any compatibility concerns. State explicitly that it has **not** been activated. Promotion is `python3 -m knowledge_stack promote <commit>` in the knowledge repository after review; never imply that the weekly updater performed this step.
-14. For `AVAILABLE: Graphify`, compare source commits and changed skill, CLI, MCP, or dependency files. The updater may fast-forward the clean upstream source, but it does not promote the installed uv tool. The active Codex protocol/references are linked to that tool, so they stay aligned with CLI/MCP. State the active and available commits and version; activation is `~/.local/share/sheva-agent-stack/scripts/activate-graphify` after review. For `ATTENTION: Graphify`, explain dirty source or runtime/link drift and do not imply promotion succeeded.
-
-## Output
-
-Start with a short plain-language overview.
-
-For every meaningful change use:
-
-### <skill or component>
-
-**Что изменилось:** concrete behavioral or structural change.
-
-**Зачем:** what problem it solves.
-
-**Что это меняет для меня:** practical effect in this Codex / CanvasTTY setup.
-
-**Как пользоваться:** only when usage changed or a new capability appeared.
-
-**Нужно ли что-то сделать:** exact action, or explicitly say that no action is required.
-
-If nothing affecting enabled skills changed, say so explicitly.
-
-## Completion
-
-Only after all pending update reports have been successfully analyzed and explained:
-
-remove:
-
-`~/.local/state/agent-skill-updater/pending`
-
-Do not delete historical reports from:
-
-`~/.local/state/agent-skill-updater/reports/`
+For source revisions already applied by the updater with no remaining install decision, acknowledge as `updated` quietly. Acknowledge the exact report; do not simply delete the whole pending file. New revisions remain eligible for a new question.
